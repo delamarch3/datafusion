@@ -18,12 +18,16 @@
 //! Signature module contains foundational types that are used to represent signatures, types,
 //! and return types of functions in DataFusion.
 
-use crate::type_coercion::binary::*;
+use crate::type_coercion::{
+    aggregates::{ALL, NUMERICS, STRINGS},
+    binary::{binary_numeric_coercion, comparison_coercion, string_coercion},
+};
 use arrow::{compute::can_cast_types, datatypes::DataType};
 use datafusion_common::{
     internal_datafusion_err, internal_err, plan_err,
     utils::coerced_fixed_size_list_to_list, Result,
 };
+use itertools::Itertools;
 
 /// Constant that is used as a placeholder for any valid timezone.
 /// This is used where a function can accept a timestamp type with any
@@ -257,16 +261,41 @@ impl TypeSignature {
                 .iter()
                 .flat_map(|type_sig| type_sig.get_possible_types())
                 .collect(),
+            TypeSignature::Uniform(arg_count, types) => types
+                .iter()
+                .cloned()
+                .map(|data_type| vec![data_type; *arg_count])
+                .collect(),
+            TypeSignature::Coercible(types) => types
+                .iter()
+                .map(|to_type| {
+                    ALL.iter()
+                        .filter(|from_type| can_cast_types(from_type, to_type))
+                        .cloned()
+                        .collect::<Vec<DataType>>()
+                })
+                .multi_cartesian_product()
+                .collect(),
+            TypeSignature::Variadic(types) => types
+                .iter()
+                .cloned()
+                .map(|data_type| vec![data_type; types.len()])
+                .collect(),
+            TypeSignature::Numeric(arg_count) => NUMERICS
+                .iter()
+                .cloned()
+                .map(|numeric_type| vec![numeric_type; *arg_count])
+                .collect(),
+            TypeSignature::String(arg_count) => STRINGS
+                .iter()
+                .cloned()
+                .map(|string_type| vec![string_type; *arg_count])
+                .collect(),
             // TODO: Implement for other types
-            TypeSignature::Uniform(_, _)
-            | TypeSignature::Coercible(_)
-            | TypeSignature::Any(_)
-            | TypeSignature::Variadic(_)
+            TypeSignature::Any(_)
             | TypeSignature::VariadicAny
-            | TypeSignature::UserDefined
             | TypeSignature::ArraySignature(_)
-            | TypeSignature::Numeric(_)
-            | TypeSignature::String(_) => vec![],
+            | TypeSignature::UserDefined => vec![],
         }
     }
 }
@@ -801,6 +830,86 @@ mod tests {
                 vec![DataType::Int32, DataType::Int64],
                 vec![DataType::Float32, DataType::Float64],
                 vec![DataType::Utf8]
+            ]
+        );
+
+        let type_signature =
+            TypeSignature::Uniform(2, vec![DataType::Float32, DataType::Int64]);
+        let possible_types = type_signature.get_possible_types();
+        assert_eq!(
+            possible_types,
+            vec![
+                vec![DataType::Float32, DataType::Float32],
+                vec![DataType::Int64, DataType::Int64]
+            ]
+        );
+
+        let type_signature =
+            TypeSignature::Coercible(vec![DataType::Utf8, DataType::Int64]);
+        let possible_types = type_signature.get_possible_types();
+        assert_eq!(possible_types.len(), 255);
+        let possible_utf8_first_types = possible_types
+            .iter()
+            .filter(|types| types[0] == DataType::Utf8)
+            .cloned()
+            .collect::<Vec<Vec<DataType>>>();
+        assert_eq!(
+            possible_utf8_first_types,
+            vec![
+                vec![DataType::Utf8, DataType::Utf8],
+                vec![DataType::Utf8, DataType::LargeUtf8],
+                vec![DataType::Utf8, DataType::Int8],
+                vec![DataType::Utf8, DataType::Int16],
+                vec![DataType::Utf8, DataType::Int32],
+                vec![DataType::Utf8, DataType::Int64],
+                vec![DataType::Utf8, DataType::UInt8],
+                vec![DataType::Utf8, DataType::UInt16],
+                vec![DataType::Utf8, DataType::UInt32],
+                vec![DataType::Utf8, DataType::UInt64],
+                vec![DataType::Utf8, DataType::Float16],
+                vec![DataType::Utf8, DataType::Float32],
+                vec![DataType::Utf8, DataType::Float64],
+                vec![DataType::Utf8, DataType::Date32],
+                vec![DataType::Utf8, DataType::Date64]
+            ]
+        );
+
+        let type_signature =
+            TypeSignature::Variadic(vec![DataType::Int32, DataType::Int64]);
+        let possible_types = type_signature.get_possible_types();
+        assert_eq!(
+            possible_types,
+            vec![
+                vec![DataType::Int32, DataType::Int32],
+                vec![DataType::Int64, DataType::Int64]
+            ]
+        );
+
+        let type_signature = TypeSignature::Numeric(2);
+        let possible_types = type_signature.get_possible_types();
+        assert_eq!(
+            possible_types,
+            vec![
+                vec![DataType::Int8, DataType::Int8],
+                vec![DataType::Int16, DataType::Int16],
+                vec![DataType::Int32, DataType::Int32],
+                vec![DataType::Int64, DataType::Int64],
+                vec![DataType::UInt8, DataType::UInt8],
+                vec![DataType::UInt16, DataType::UInt16],
+                vec![DataType::UInt32, DataType::UInt32],
+                vec![DataType::UInt64, DataType::UInt64],
+                vec![DataType::Float32, DataType::Float32],
+                vec![DataType::Float64, DataType::Float64]
+            ]
+        );
+
+        let type_signature = TypeSignature::String(2);
+        let possible_types = type_signature.get_possible_types();
+        assert_eq!(
+            possible_types,
+            vec![
+                vec![DataType::Utf8, DataType::Utf8],
+                vec![DataType::LargeUtf8, DataType::LargeUtf8]
             ]
         );
     }

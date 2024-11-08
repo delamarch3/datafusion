@@ -81,6 +81,30 @@ pub static TIMES: &[DataType] = &[
     DataType::Time64(TimeUnit::Nanosecond),
 ];
 
+pub static ALL: &[DataType] = &[
+    // Strings
+    DataType::Utf8,
+    DataType::LargeUtf8,
+    // Numerics
+    DataType::Int8,
+    DataType::Int16,
+    DataType::Int32,
+    DataType::Int64,
+    DataType::UInt8,
+    DataType::UInt16,
+    DataType::UInt32,
+    DataType::UInt64,
+    DataType::Float16,
+    DataType::Float32,
+    DataType::Float64,
+    // Dates
+    DataType::Date32,
+    DataType::Date64,
+    // Binarys
+    DataType::Binary,
+    DataType::LargeBinary,
+];
+
 /// Validate the length of `input_types` matches the `signature` for `agg_fun`.
 ///
 /// This method DOES NOT validate the argument types - only that (at least one,
