@@ -106,6 +106,7 @@ mod tests {
     use crate::parquet::basic::Compression;
     use crate::test_util::parquet_test_data;
 
+    use arrow::array::ArrayRef;
     use arrow::util::pretty::pretty_format_batches;
     use datafusion_common::config::TableParquetOptions;
     use datafusion_common::{
@@ -113,7 +114,12 @@ mod tests {
     };
     use datafusion_execution::config::SessionConfig;
 
+    use object_store::memory::InMemory;
+    use object_store::path::Path;
+    use parquet::arrow::async_writer::ParquetObjectWriter;
+    use parquet::arrow::AsyncArrowWriter;
     use tempfile::{tempdir, TempDir};
+    use url::Url;
 
     #[tokio::test]
     async fn read_with_glob_path() -> Result<()> {
@@ -518,6 +524,80 @@ mod tests {
         assert_batches_eq!(&[
             "++",
             "++",
+        ], &actual);
+
+        Ok(())
+    }
+
+    async fn create_object_store<const N: usize>(
+        file_name: &str,
+        schema: Arc<Schema>,
+        fields_data: [Vec<i32>; N],
+    ) -> Result<Arc<InMemory>> {
+        let columns: Vec<ArrayRef> = fields_data
+            .into_iter()
+            .map(|field_data| Arc::new(Int32Array::from(field_data)) as ArrayRef)
+            .collect();
+        let batch = RecordBatch::try_new(schema, columns)?;
+
+        let store = Arc::new(InMemory::new());
+        let writer = ParquetObjectWriter::new(store.clone(), Path::from(file_name));
+        let mut writer = AsyncArrowWriter::try_new(writer, batch.schema(), None).unwrap();
+        writer.write(&batch).await?;
+        writer.close().await?;
+
+        Ok(store)
+    }
+
+    #[tokio::test]
+    async fn read_from_multiple_object_stores() -> Result<()> {
+        let ctx = SessionContext::new();
+
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("key1", DataType::Int32, false),
+            Field::new("key2", DataType::Int32, false),
+        ]));
+
+        let store1 = create_object_store(
+            "test_path_1.parquet",
+            schema.clone(),
+            [vec![1, 2, 3], vec![11, 22, 33]],
+        )
+        .await?;
+        ctx.register_object_store(&Url::parse("mem1://memory/").unwrap(), store1);
+
+        let store2 = create_object_store(
+            "test_path_2.parquet",
+            schema.clone(),
+            [vec![4, 5, 6], vec![44, 55, 66]],
+        )
+        .await?;
+        ctx.register_object_store(&Url::parse("mem2://memory/").unwrap(), store2);
+
+        let actual = ctx
+            .read_parquet(
+                vec![
+                    "mem1://memory/test_path_1.parquet",
+                    "mem2://memory/test_path_2.parquet",
+                ],
+                ParquetReadOptions::default(),
+            )
+            .await?
+            .collect()
+            .await?;
+
+        #[cfg_attr(any(), rustfmt::skip)]
+        assert_batches_sorted_eq!(&[
+            "+------+------+",
+            "| key1 | key2 |",
+            "+------+------+",
+            "| 1    | 11   |",
+            "| 2    | 22   |",
+            "| 3    | 33   |",
+            "| 4    | 44   |",
+            "| 5    | 55   |",
+            "| 6    | 66   |",
+            "+------+------+",
         ], &actual);
 
         Ok(())
