@@ -637,43 +637,54 @@ impl ListingTable {
         filters: &'a [Expr],
         limit: Option<usize>,
     ) -> datafusion_common::Result<ListFilesResult> {
-        let store = if let Some(url) = self.table_paths.first() {
-            ctx.runtime_env().object_store(url)?
-        } else {
+        let stores = self
+            .table_paths
+            .iter()
+            .map(|url| ctx.runtime_env().object_store(url))
+            .collect::<datafusion_common::Result<Vec<_>>>()?;
+        if stores.is_empty() {
             return Ok(ListFilesResult {
                 file_groups: vec![],
                 statistics: Statistics::new_unknown(&self.file_schema),
                 grouped_by_partition: false,
             });
-        };
+        }
+
         // list files (with partitions)
-        let file_list = future::try_join_all(self.table_paths.iter().map(|table_path| {
-            pruned_partition_list(
-                ctx,
-                store.as_ref(),
-                table_path,
-                filters,
-                &self.options.file_extension,
-                &self.options.table_partition_cols,
-            )
-        }))
+        let file_list = future::try_join_all(
+            std::iter::zip(&self.table_paths, &stores).map(|(table_path, store)| {
+                pruned_partition_list(
+                    ctx,
+                    store.as_ref(),
+                    table_path,
+                    filters,
+                    &self.options.file_extension,
+                    &self.options.table_partition_cols,
+                )
+            }),
+        )
         .await?;
+
         let meta_fetch_concurrency =
             ctx.config_options().execution.meta_fetch_concurrency;
-        let file_list = stream::iter(file_list).flatten_unordered(meta_fetch_concurrency);
+
         // collect the statistics if required by the config
-        let files = file_list
-            .map(|part_file| async {
-                let part_file = part_file?;
-                let statistics = if self.options.collect_stat {
-                    self.do_collect_statistics(ctx, &store, &part_file).await?
-                } else {
-                    Arc::new(Statistics::new_unknown(&self.file_schema))
-                };
-                Ok(part_file.with_statistics(statistics))
+        let files = stream::iter(file_list)
+            .zip(stream::iter(&stores))
+            .map(|(part_files, store)| {
+                part_files.map(|part_file| async {
+                    let part_file = part_file?;
+                    let statistics = if self.options.collect_stat {
+                        self.do_collect_statistics(ctx, store, &part_file).await?
+                    } else {
+                        Arc::new(Statistics::new_unknown(&self.file_schema))
+                    };
+                    Ok::<_, DataFusionError>(part_file.with_statistics(statistics))
+                })
             })
+            .flatten_unordered(meta_fetch_concurrency)
             .boxed()
-            .buffer_unordered(ctx.config_options().execution.meta_fetch_concurrency);
+            .buffer_unordered(meta_fetch_concurrency);
 
         let (file_group, inexact_stats) =
             get_files_with_limit(files, limit, self.options.collect_stat).await?;
